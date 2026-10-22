@@ -1,0 +1,261 @@
+(function(){
+'use strict';
+/* Merdiven saha montajı (AGRO MER). Birleşimler kaynaklı: cıvata yok. */
+const S = window.SAHA, $app = document.getElementById('app');
+const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const GRP = {
+  C:{ n:'Kolon',              css:'#1971C2' },
+  Y:{ n:'Kiriş ve çapraz',    css:'#0C8599' },
+  M:{ n:'Merdiven kirişi',    css:'#2B8A3E' },
+  S:{ n:'Sac',                css:'#7048E8' },
+  K:{ n:'Korkuluk',           css:'#862E9C' }
+};
+const STAGES = ['C','Y','M','S','K'];
+const SEL = [0xE03131, 0xB02525, 0xFF6B6B, 0xC92A2A], NB = [0xFCC419, 0xF08C00, 0xFFE066, 0xE8A317];
+const BY = {}; S.items.forEach(it => BY[it.id] = it);
+const byMark = {}; S.items.forEach(it => (byMark[it.mark.toLowerCase()] = byMark[it.mark.toLowerCase()] || []).push(it));
+let stage = 0;
+
+/* renk kuralı: aynı poz = aynı renk, farklı poz = farklı renk (seçim renkleri kırmızı/sarı kullanılmaz) */
+(function color(){
+  STAGES.forEach(g => {
+    const marks = [...new Set(S.items.filter(it => it.g === g).map(it => it.mark))]
+      .sort((a,b) => a.split('/')[0].localeCompare(b.split('/')[0]) || (+a.split('/')[1]) - (+b.split('/')[1]));
+    const n = marks.length, col = {};
+    // ton 100°..320° (yeşil-camgöbeği-mavi-mor-pembe): kırmızı ve sarı seçim renklerine yakın tonlar kullanılmaz
+    marks.forEach((m,i) => {
+      const h = 100 + ((i * 0.6180339887) % 1) * 220;
+      const l = [0.40, 0.56, 0.32, 0.64][i % 4];
+      col[m] = new THREE.Color().setHSL(h/360, 0.65, l).getHex();
+    });
+    S.items.forEach(it => { if(it.g === g) it.hex = col[it.mark]; });
+  });
+})();
+
+/* ---------- geometri ---------- */
+function b64(s){ const bin = atob(s), u = new Uint8Array(bin.length); for(let i=0;i<bin.length;i++) u[i] = bin.charCodeAt(i); return u.buffer; }
+function geomOf(it){
+  if(it._g) return it._g;
+  const vi = new Int32Array(b64(it.v)), fi = it.fw === 2 ? new Uint16Array(b64(it.f)) : new Uint32Array(b64(it.f));
+  const pos = new Float32Array(vi.length);
+  for(let i=0;i<vi.length;i+=3){ pos[i] = vi[i]+it.o[0]; pos[i+1] = vi[i+2]+it.o[2]; pos[i+2] = -(vi[i+1]+it.o[1]); }
+  const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(pos, 3)); g.setIndex(new THREE.BufferAttribute(fi, 1)); g.computeVertexNormals();
+  it._g = g; it._e = new THREE.EdgesGeometry(g, 30); return g;
+}
+const P3 = (x,y,z) => new THREE.Vector3(x, z, -y);
+
+/* ---------- malzemeler ---------- */
+const MC = {};
+const SHEET_OP = 0.95;   // saclar biraz şeffaf (opaklık 0,95)
+function solid(hex, sheet){
+  const k = hex+(sheet ? 's' : '');
+  return MC[k] || (MC[k] = new THREE.MeshStandardMaterial({ color:hex, metalness:0.2, roughness:0.6, side:THREE.DoubleSide, flatShading:true,
+    transparent:!!sheet, opacity:sheet ? SHEET_OP : 1, depthWrite:!sheet, polygonOffset:true, polygonOffsetFactor:1, polygonOffsetUnits:1 }));
+}
+function edgeOf(hex){ const k = 'e'+hex; return MC[k] || (MC[k] = new THREE.LineBasicMaterial({ color:new THREE.Color(hex).multiplyScalar(0.55) })); }
+const FADE = new THREE.MeshStandardMaterial({ color:0x9DA9B4, side:THREE.DoubleSide, flatShading:true, transparent:true, opacity:0.5, depthWrite:false });
+const FADE_S = new THREE.MeshStandardMaterial({ color:0xA9B2BA, side:THREE.DoubleSide, flatShading:true, transparent:true, opacity:0.35, depthWrite:false });
+const EDGE_F = new THREE.LineBasicMaterial({ color:0x7F8A94, transparent:true, opacity:0.45 });
+const GHOST = new THREE.MeshStandardMaterial({ color:0xB4BEC7, side:THREE.DoubleSide, flatShading:true, transparent:true, opacity:0.22, depthWrite:false });
+const GHOST_S = new THREE.MeshStandardMaterial({ color:0xC2C9CF, side:THREE.DoubleSide, flatShading:true, transparent:true, opacity:0.14, depthWrite:false });
+const EDGE_G = new THREE.LineBasicMaterial({ color:0x9AA5AE, transparent:true, opacity:0.25 });
+const HOLE = new THREE.MeshBasicMaterial({ color:0x111518 });
+const DIA = { 14:'#1E9E52', 18:'#E8590C', 16:'#1C7ED6', 22:'#AE3EC9' };
+const RM = {}; const ringM = d => RM[d] || (RM[d] = new THREE.MeshBasicMaterial({ color:new THREE.Color(DIA[d] || '#495057') }));
+
+/* ---------- 3B ---------- */
+const V = { r:null, scene:null, cam:null, ctl:null, el:null, root:null, meshes:{}, sel:[], view:'iso' };
+function makeLabel(text, bg, fg, h){
+  const c = document.createElement('canvas'), ctx = c.getContext('2d'), fs = 64;
+  const font = '700 '+fs+'px "Barlow Condensed","Arial Narrow",Arial,sans-serif';
+  ctx.font = font; c.width = Math.ceil(ctx.measureText(text).width) + 32; c.height = fs + 24;
+  ctx.font = font; ctx.fillStyle = bg; ctx.beginPath(); if(ctx.roundRect) ctx.roundRect(0,0,c.width,c.height,14); else ctx.rect(0,0,c.width,c.height);
+  ctx.fill(); ctx.fillStyle = fg; ctx.textBaseline = 'middle'; ctx.fillText(text, 16, c.height/2+3);
+  const tex = new THREE.CanvasTexture(c); tex.minFilter = THREE.LinearFilter;
+  const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map:tex, depthTest:false })); sp.renderOrder = 10; sp.userData.h = h; sp.userData.asp = c.width/c.height; return sp;
+}
+function init(el){
+  V.el = el;
+  if(!V.r){
+    const r = new THREE.WebGLRenderer({ antialias:true, alpha:true }); r.setPixelRatio(Math.min(window.devicePixelRatio||1, 2)); V.r = r;
+    V.scene = new THREE.Scene(); V.cam = new THREE.OrthographicCamera(-1,1,1,-1,1,1e7);
+    V.scene.add(new THREE.HemisphereLight(0xffffff, 0x7d8894, 0.85));
+    const d1 = new THREE.DirectionalLight(0xffffff, 0.7); d1.position.set(0.4,1,0.7); V.scene.add(d1);
+    const d2 = new THREE.DirectionalLight(0xffffff, 0.3); d2.position.set(-0.6,-0.4,-0.8); V.scene.add(d2);
+    V.ctl = new THREE.OrbitControls(V.cam, r.domElement); V.ctl.addEventListener('change', render);
+    window.addEventListener('resize', () => { resize(); fit(); });
+    let down = null;
+    r.domElement.addEventListener('pointerdown', e => { down = [e.clientX, e.clientY]; });
+    r.domElement.addEventListener('pointerup', e => { if(down && Math.hypot(e.clientX-down[0], e.clientY-down[1]) < 6) pick(e); down = null; });
+    const root = new THREE.Group(); V.root = root;
+    S.items.forEach(it => {
+      const m = new THREE.Mesh(geomOf(it)); m.userData.id = it.id;
+      const e = new THREE.LineSegments(it._e);
+      const g = new THREE.Group(); g.add(m); g.add(e); g.userData.it = it; V.meshes[it.id] = { g, m, e }; root.add(g);
+    });
+    V.labels = new THREE.Group(); V.holes = new THREE.Group(); root.add(V.labels); root.add(V.holes);
+    V.scene.add(root);
+  }
+  el.appendChild(V.r.domElement); resize();
+}
+function stageState(it){
+  const k = STAGES.indexOf(it.g);
+  return k < stage ? 'done' : (k === stage ? 'now' : 'hidden');
+}
+/* görünüm durumu: seçim varsa sadece seçilen(ler) + bağlandıkları (sonraki aşamalar hariç) */
+function viewState(it){
+  const st = stageState(it);
+  if(!V.sel.length) return st;
+  if(V.selSet.has(it.id)) return 'sel';
+  if(V.nbSet.has(it.id) && st !== 'hidden') return 'nb';
+  return st === 'hidden' ? 'hidden' : 'ghost';
+}
+function applyStyle(){
+  V.selSet = new Set(V.sel); V.nbSet = new Set();
+  V.sel.forEach(id => BY[id].con.forEach(c => { if(!V.selSet.has(c)) V.nbSet.add(c); }));
+  // bağlı olanlar arasında da farklı sarı tonlar
+  const nbList = [...V.nbSet].map(id => BY[id]).sort((a,b) => a.bmin[0]-b.bmin[0] || a.bmin[1]-b.bmin[1]), nbCi = {};
+  nbList.forEach((it,i) => nbCi[it.id] = i % NB.length);
+  const selCi = {}; V.sel.forEach((id,i) => selCi[id] = i % SEL.length);
+  S.items.forEach(it => {
+    const o = V.meshes[it.id], vs = viewState(it), sheet = it.g === 'S';
+    o.g.visible = vs !== 'hidden';
+    let hex = null;
+    if(vs === 'sel') hex = SEL[selCi[it.id] || 0];
+    else if(vs === 'nb') hex = NB[nbCi[it.id] || 0];
+    else if(vs === 'now') hex = it.hex;
+    if(hex !== null){ o.m.material = solid(hex, sheet); o.e.material = edgeOf(hex); }
+    else if(vs === 'ghost'){ o.m.material = sheet ? GHOST_S : GHOST; o.e.material = EDGE_G; }
+    else { o.m.material = sheet ? FADE_S : FADE; o.e.material = EDGE_F; }
+  });
+  // isim etiketleri (tıklamadan görünür; sığmayan gizlenir, yakınlaşınca açılır)
+  V.labels.clear();
+  S.items.forEach(it => {
+    const vs = viewState(it);
+    if(V.sel.length ? !(vs === 'sel' || vs === 'nb') : vs !== 'now') return;
+    const bg = vs === 'sel' ? '#E03131' : (vs === 'nb' ? '#FCC419' : '#FFFFFF'), fg = vs === 'sel' ? '#FFFFFF' : '#1A2026';
+    const lb = makeLabel(it.mark, bg, fg, vs === 'sel' ? 0.05 : 0.036);
+    const size = (it.bmax[0]-it.bmin[0]) + (it.bmax[1]-it.bmin[1]) + (it.bmax[2]-it.bmin[2]);
+    lb.userData.prio = vs === 'sel' ? 1e9 : size;
+    // etiket malzemenin üstünde: ana parçanın ekseni boyunca birkaç aday nokta (orta, %30, %70, %15, %85)
+    lb.userData.anchors = (it.lp || [[(it.bmin[0]+it.bmax[0])/2, (it.bmin[1]+it.bmax[1])/2, (it.bmin[2]+it.bmax[2])/2]]).map(q => P3(q[0], q[1], q[2]));
+    lb.position.copy(lb.userData.anchors[0]); V.labels.add(lb);
+  });
+  // delikler (görünen elemanlarda); renkli halka: renkli gösterilenlerde
+  V.holes.clear();
+  const holes = [], rings = {};
+  S.items.forEach(it => { const vs = viewState(it); if(vs === 'hidden' || vs === 'ghost' || !it.h || !it.h.length) return;
+    it.h.forEach(h => { holes.push(h); if(vs !== 'done') (rings[h[6]] = rings[h[6]] || []).push(h); }); });
+  const up = new THREE.Vector3(0,1,0), zz = new THREE.Vector3(0,0,1), M4 = new THREE.Matrix4(), q = new THREE.Quaternion(), sc = new THREE.Vector3(), p = new THREE.Vector3();
+  if(holes.length){
+    const im = new THREE.InstancedMesh(V.cylG || (V.cylG = new THREE.CylinderGeometry(0.5,0.5,1,14)), HOLE, holes.length);
+    holes.forEach((h,k) => { const n = P3(h[3],h[4],h[5]).normalize(); q.setFromUnitVectors(up, n); p.copy(P3(h[0],h[1],h[2])); sc.set(h[6], h[7]+1.5, h[6]); M4.compose(p,q,sc); im.setMatrixAt(k, M4); });
+    V.holes.add(im);
+  }
+  Object.keys(rings).forEach(d => {
+    const list = rings[d], im = new THREE.InstancedMesh(V.torG || (V.torG = new THREE.TorusGeometry(1, 0.16, 6, 20)), ringM(+d), list.length*2); let k = 0;
+    list.forEach(h => { const n = P3(h[3],h[4],h[5]).normalize(); q.setFromUnitVectors(zz, n); const r = h[6]/2 + 3; sc.set(r, r, r);
+      [-1,1].forEach(s => { p.copy(P3(h[0],h[1],h[2])).addScaledVector(n, s*(h[7]/2+0.8)); M4.compose(p,q,sc); im.setMatrixAt(k++, M4); }); });
+    V.holes.add(im);
+  });
+  render();
+}
+function render(){
+  if(!(V.r && V.el && V.el.isConnected)) return;
+  const c = V.cam, ws = (c.top - c.bottom)/c.zoom;
+  V.labels.children.forEach(o => o.scale.set(o.userData.asp*o.userData.h*ws, o.userData.h*ws, 1));
+  V.cam.updateMatrixWorld(); V.root.updateMatrixWorld(true); declutter(); V.r.render(V.scene, V.cam);
+}
+function declutter(){
+  // yazılar üst üste binmez: her etiket için malzeme üzerindeki aday noktalar sırayla denenir; hiçbiri sığmazsa gizlenir (yakınlaşınca açılır)
+  const Wp = V.el.clientWidth, Hp = V.el.clientHeight, placed = [], v = new THREE.Vector3();
+  const mw = V.root.matrixWorld;
+  V.labels.children.slice().sort((a,b) => b.userData.prio - a.userData.prio).forEach(sp => {
+    const h = sp.userData.h*Hp, w = sp.userData.asp*h;
+    let ok = null;
+    for(const a of (sp.userData.anchors || [sp.position.clone()])){
+      v.copy(a).applyMatrix4(mw).project(V.cam);
+      if(v.x < -1.02 || v.x > 1.02 || v.y < -1.02 || v.y > 1.02) continue;
+      const cx = (v.x+1)/2*Wp, cy = (1-v.y)/2*Hp, r = [cx-w/2-2, cy-h/2-2, cx+w/2+2, cy+h/2+2];
+      if(placed.some(q => r[0] < q[2] && r[2] > q[0] && r[1] < q[3] && r[3] > q[1])) continue;
+      ok = { a, r }; break;
+    }
+    sp.visible = !!ok;
+    if(ok){ sp.position.copy(ok.a); placed.push(ok.r); }
+  });
+}
+function resize(){ if(V.el && V.el.isConnected){ V.r.setSize(V.el.clientWidth, V.el.clientHeight, false); render(); } }
+const DIRS = { iso:[-1,1.1,1], top:[0,1,0.0001], front:[0,0.15,1], side:[1,0.15,0] };
+function worldBox(){
+  const lo=[1e12,1e12,1e12], hi=[-1e12,-1e12,-1e12];
+  S.items.forEach(it => { for(let k=0;k<3;k++){ lo[k]=Math.min(lo[k],it.bmin[k]); hi[k]=Math.max(hi[k],it.bmax[k]); } });
+  return { lo, hi };
+}
+function fit(){
+  const box = worldBox(), c = V.cam, dir = new THREE.Vector3(...DIRS[V.view]).normalize();
+  const corners = []; [box.lo[0], box.hi[0]].forEach(x => [box.lo[1], box.hi[1]].forEach(y => [box.lo[2], box.hi[2]].forEach(z => corners.push(P3(x,y,z)))));
+  const t = P3((box.lo[0]+box.hi[0])/2, (box.lo[1]+box.hi[1])/2, (box.lo[2]+box.hi[2])/2), D = 2e5;
+  c.position.copy(t).addScaledVector(dir, D); c.up.set(0,1,0); c.lookAt(t); c.updateMatrixWorld();
+  const inv = c.matrixWorldInverse; let x0=1e12,x1=-1e12,y0=1e12,y1=-1e12;
+  corners.forEach(q => { const p = q.clone().applyMatrix4(inv); x0 = Math.min(x0,p.x); x1 = Math.max(x1,p.x); y0 = Math.min(y0,p.y); y1 = Math.max(y1,p.y); });
+  const asp = V.el.clientWidth / V.el.clientHeight, cx = (x0+x1)/2, cy = (y0+y1)/2;
+  let w = (x1-x0)*1.12, h = (y1-y0)*1.15; if(w/h > asp) h = w/asp; else w = h*asp;
+  const rt = new THREE.Vector3().setFromMatrixColumn(c.matrixWorld,0), up = new THREE.Vector3().setFromMatrixColumn(c.matrixWorld,1);
+  t.addScaledVector(rt,cx).addScaledVector(up,cy); c.position.addScaledVector(rt,cx).addScaledVector(up,cy);
+  c.left=-w/2; c.right=w/2; c.top=h/2; c.bottom=-h/2; c.zoom=1; c.near=1; c.far=D*3; c.updateProjectionMatrix();
+  V.ctl.target.copy(t); V.ctl.update(); render();
+}
+function pick(e){
+  const rect = V.r.domElement.getBoundingClientRect();
+  const m = new THREE.Vector2(((e.clientX-rect.left)/rect.width)*2-1, -((e.clientY-rect.top)/rect.height)*2+1);
+  const rc = new THREE.Raycaster(); rc.setFromCamera(m, V.cam);
+  const objs = Object.values(V.meshes).filter(o => { if(!o.g.visible) return false; const vs = viewState(o.g.userData.it);
+    return vs === 'now' || vs === 'sel' || vs === 'nb'; }).map(o => o.m);
+  const hit = rc.intersectObjects(objs, false)[0];
+  if(hit) location.hash = '#/m/'+hit.object.userData.id;
+  else if(V.sel.length) location.hash = '#/';
+}
+
+/* ---------- arayüz ---------- */
+function infoCard(ids){
+  if(!ids.length) return '';
+  const it = BY[ids[0]], n = ids.length;
+  return '<div class="infocard"><h2>'+esc(it.mark)+(n > 1 ? ' <small class="muted">'+n+' adet</small>' : '')+'</h2>'+
+    '<div class="row"><div><div class="k">Cıvata</div><div class="v">yok (kaynaklı)</div></div>'+
+    (it.kg ? '<div><div class="k">Ağırlık'+(n > 1 ? ' (her biri)' : '')+'</div><div class="v">'+String(it.kg).replace('.', ',')+' kg</div></div>' : '')+'</div></div>';
+}
+function stageButtons(){ return STAGES.map((k,i) => '<button data-s="'+i+'" aria-pressed="'+(i === stage)+'"><i style="background:'+GRP[k].css+'"></i>'+(i+1)+'. '+GRP[k].n+'</button>').join(''); }
+function setStage(k){ stage = k; document.querySelectorAll('#layers button').forEach(b => b.setAttribute('aria-pressed', +b.dataset.s === k)); }
+let built = false;
+function page(){
+  if(built) return; built = true;
+  $app.innerHTML = '<div class="intro"><h1>Merdiven saha montajı</h1><p class="lead muted">Aşamayı seç, elemana dokun veya numarasını yaz.</p></div>'+
+    '<div class="layers" id="layers">'+stageButtons()+'</div>'+
+    '<div class="viewer big" id="viewer"><span class="vhint">Dokun: seç · boş yere dokun: seçimi kaldır · iki parmak: yakınlaş</span></div>'+
+    '<div class="vbtns" id="vbtns"><button data-v="iso" aria-pressed="true">İzometrik</button><button data-v="top">Üstten (plan)</button><button data-v="front">Önden</button><button data-v="side">Yandan</button></div>'+
+    '<div id="info"></div>';
+  init(document.getElementById('viewer'));
+  document.querySelectorAll('#vbtns button').forEach(b => b.onclick = () => { V.view = b.dataset.v; document.querySelectorAll('#vbtns button').forEach(x => x.setAttribute('aria-pressed', x === b)); fit(); });
+  document.querySelectorAll('#layers button').forEach(b => b.onclick = () => { setStage(+b.dataset.s); if(V.sel.length) location.hash = '#/'; else applyStyle(); });
+  fit();
+}
+function route(){
+  page();
+  const h = decodeURIComponent(location.hash); let m, ids = [];
+  if((m = h.match(/^#\/m\/(\d+)$/)) && BY[+m[1]]) ids = [+m[1]];
+  else if((m = h.match(/^#\/k\/(.+)$/)) && byMark[m[1].toLowerCase()]) ids = byMark[m[1].toLowerCase()].map(it => it.id);
+  if(ids.length) setStage(STAGES.indexOf(BY[ids[0]].g));
+  V.sel = ids;
+  document.getElementById('info').innerHTML = infoCard(ids);
+  applyStyle();
+}
+document.getElementById('searchForm').addEventListener('submit', e => {
+  e.preventDefault();
+  const q = document.getElementById('q').value.trim().toLowerCase().replace(/\s+/g,'').replace(/^([a-z]+)[-\/]?(\d+)$/, '$1/$2');
+  if(byMark[q]){ const t = '#/k/'+byMark[q][0].mark; if(decodeURIComponent(location.hash) === t) route(); else location.hash = t; }
+  else document.getElementById('info').innerHTML = '<p class="warn">"'+esc(q)+'" bulunamadı. Örnek: C/9, B/1, K/7, p/4, s/1.</p>';
+  document.getElementById('q').blur();
+});
+window.addEventListener('hashchange', route);
+route();
+})();
