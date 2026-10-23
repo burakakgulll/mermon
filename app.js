@@ -161,7 +161,6 @@ function applyStyle(){
   render();
 }
 function render(){
-  if(V.ar) return;                      // AR açıkken çizimi XR döngüsü yapar
   if(!(V.r && V.el && V.el.isConnected)) return;
   const c = V.cam, ws = (c.top - c.bottom)/c.zoom;
   V.labels.children.forEach(o => o.scale.set(o.userData.asp*o.userData.h*ws, o.userData.h*ws, 1));
@@ -226,217 +225,8 @@ function infoCard(ids){
     (it.kg ? '<div><div class="k">Ağırlık'+(n > 1 ? ' (her biri)' : '')+'</div><div class="v">'+String(it.kg).replace('.', ',')+' kg</div></div>' : '')+'</div></div>';
 }
 function stageButtons(){ return STAGES.map((k,i) => '<button data-s="'+i+'" aria-pressed="'+(i === stage)+'"><i style="background:'+GRP[k].css+'"></i>'+(i+1)+'. '+GRP[k].n+'</button>').join(''); }
-function setStage(k){ stage = k; document.querySelectorAll('#layers button').forEach(b => b.setAttribute('aria-pressed', +b.dataset.s === k)); arStageChanged(); }
+function setStage(k){ stage = k; document.querySelectorAll('#layers button').forEach(b => b.setAttribute('aria-pressed', +b.dataset.s === k)); }
 
-/* ================= AR (kamera açık) =================
-   Android (Chrome, ARCore): WebXR "immersive-ar". Sadece https'ten (GitHub Pages) açılınca çalışır.
-   iPhone (Safari): AR Quick Look ile her aşama için hazır .usdz dosyası (ar/asamaN.usdz).
-   Yerleştirme noktası: C/11 kolonunun (aks 1/A) taban plakası ortası. */
-const AR_ANCHOR = [60, -40, 0];          // mm, IFC koordinatı
-const AR = { session:null, ref:null, hts:null, group:null, reticle:null, mark1:null, step:0, p1:null, anchor:null, anchorPose:null, offset:null, scale:1, yaw:0, ui:null, frame:0, lost:false, msg:'' };
-function arSupportedIOS(){ const a = document.createElement('a'); return !!(a.relList && a.relList.supports && a.relList.supports('ar')); }
-function arButtonImg(text){
-  const c = document.createElement('canvas'), ctx = c.getContext('2d'), fs = 34;
-  ctx.font = '700 '+fs+'px "Barlow Condensed","Arial Narrow",Arial,sans-serif';
-  c.width = Math.ceil(ctx.measureText(text).width) + 40; c.height = fs + 30;
-  ctx.fillStyle = '#1F2D3A'; ctx.beginPath(); if(ctx.roundRect) ctx.roundRect(0,0,c.width,c.height,10); else ctx.rect(0,0,c.width,c.height); ctx.fill();
-  ctx.font = '700 '+fs+'px "Barlow Condensed","Arial Narrow",Arial,sans-serif'; ctx.fillStyle = '#fff'; ctx.textBaseline = 'middle'; ctx.fillText(text, 20, c.height/2+2);
-  return c.toDataURL('image/png');
-}
-function arSetup(){
-  const row = document.getElementById('arrow'); if(!row) return;
-  const ios = arSupportedIOS(), single = !!window.SAHA_SINGLE;
-  let html = '<h3>Kamerada gör (AR)</h3>';
-  if(ios && !single) html += '<a rel="ar" id="arIos" href="ar/asama'+(stage+1)+'.usdz"><img id="arIosImg" alt="AR"></a>'+
-    '<p class="muted small">iPhone: model yere oturur; parmakla kaydır, iki parmakla döndür. Seçme ve isimler bu görüntüleyicide yok.</p>';
-  html += '<button id="arBtn" class="arbtn" hidden>Kamerada gör (Android)</button><p id="arNote" class="muted small"></p>';
-  row.innerHTML = html;
-  arStageChanged();
-  const note = document.getElementById('arNote');
-  if(single){ note.textContent = 'AR, tek dosya sürümünde çalışmaz. Siteyi GitHub adresinden aç; iPhone için ar klasöründeki .usdz dosyaları Dosyalar uygulamasından da açılır.'; return; }
-  if(navigator.xr && navigator.xr.isSessionSupported){
-    navigator.xr.isSessionSupported('immersive-ar').then(ok => {
-      if(ok){ const b = document.getElementById('arBtn'); b.hidden = false; b.onclick = arStart; note.textContent = 'İki noktayla yerleştirilir: önce C/11 tabanı (aks 1/A), sonra C/16 tabanı (aks 1). Model gerçek dünyaya sabitlenir.'; }
-      else if(!ios) note.textContent = 'Bu telefonda/tarayıcıda AR yok. Android’de Chrome ve “Google Play Hizmetleri (AR)” gerekir.';
-    }).catch(() => {});
-  } else if(!ios) note.textContent = 'Bu tarayıcıda AR yok. Android’de Chrome, iPhone’da Safari kullan.';
-}
-function arStageChanged(){
-  const a = document.getElementById('arIos'), im = document.getElementById('arIosImg');
-  if(a){ a.href = 'ar/asama'+(stage+1)+'.usdz'; im.src = arButtonImg('Kamerada gör (iPhone) · '+(stage+1)+'. '+GRP[STAGES[stage]].n); }
-  if(AR.ui) arUi();
-}
-function arUi(){
-  const u = AR.ui, it = V.sel.length ? BY[V.sel[0]] : null;
-  u.querySelector('.arstage').textContent = (stage+1)+'. '+GRP[STAGES[stage]].n;
-  u.querySelector('.arscale').textContent = AR.scale === 1 ? 'Ölçek 1:1' : 'Ölçek 1:20';
-  u.querySelector('.arskip').hidden = AR.step !== 1;
-  let hint = '';
-  if(AR.lost) hint = 'Konum takibi kayboldu: model şu an seninle birlikte kayar. Yavaş yürü, kamerayı desenli zemine / kolonlara tut, ışık yeterli olsun.';
-  else if(AR.step === 0) hint = AR.scale === 1 ? '1. nokta: halkayı C/11 tabanına (aks 1/A, ankraj grubunun ortası) getir ve dokun.' : 'Halkayı masaya / yere getir ve dokun.';
-  else if(AR.step === 1) hint = '2. nokta: halkayı C/16 tabanına getir (aynı aks 1 üzerinde, 3,16 m ileride) ve dokun.';
-  else if(AR.msg) hint = AR.msg;
-  else if(!it) hint = 'Elemana dokun: seç. Boş yere dokun: seçimi kaldır.';
-  u.querySelector('.arhint').textContent = hint;
-  u.querySelector('.arcard').innerHTML = it ? '<b>'+esc(it.mark)+'</b> · Cıvata: yok (kaynaklı) · '+String(it.kg).replace('.', ',')+' kg' : '';
-  u.querySelector('.arcard').hidden = !it;
-}
-function arBuildUi(){
-  const u = document.createElement('div'); u.id = 'arui';
-  u.innerHTML = '<div class="artop"><button data-a="prev">‹</button><span class="arstage"></span><button data-a="next">›</button><button data-a="exit" class="arexit">Çık</button></div>'+
-    '<div class="arhint"></div><button data-a="skip" class="arskip" hidden>Tek nokta yeter (yönü elle çevireceğim)</button><div class="arcard" hidden></div>'+
-    '<div class="arbot"><button data-a="rl">⟲ 2,5°</button><button data-a="rr">⟳ 2,5°</button><button data-a="scale" class="arscale"></button><button data-a="re">Yeniden yerleştir</button></div>';
-  // butonlara dokunmak sahnede "seç" sayılmasın
-  u.addEventListener('beforexrselect', e => { if(e.target.closest('button')) e.preventDefault(); });
-  u.addEventListener('click', e => {
-    const b = e.target.closest('button'); if(!b) return;
-    const a = b.dataset.a;
-    if(a === 'exit') AR.session && AR.session.end();
-    else if(a === 'prev' || a === 'next'){ setStage(Math.max(0, Math.min(STAGES.length-1, stage + (a === 'next' ? 1 : -1)))); V.sel = []; applyStyle(); arUi(); }
-    else if(a === 'rl' || a === 'rr'){ if(AR.step === 2){ AR.yaw += (a === 'rl' ? 1 : -1) * Math.PI/72; AR.msg = 'Yön elle düzeltildi (2,5°).'; arPose(); arUi(); } }
-    else if(a === 'scale'){ AR.scale = AR.scale === 1 ? 1/20 : 1; arReset(); }
-    else if(a === 're') arReset();
-    else if(a === 'skip'){ AR.step = 2; AR.msg = 'Tek nokta: yönü ⟲ ⟳ ile kolonlara göre çevir.'; arPose(); AR.group.visible = true; arUi(); }
-  });
-  document.body.appendChild(u); return u;
-}
-function arReset(){
-  if(AR.anchor && AR.anchor.delete) try{ AR.anchor.delete(); }catch(e){}
-  AR.anchor = null; AR.anchorFirst = null; AR.anchorPose = null; AR.offset = null; AR.p1 = null; AR.step = 0; AR.msg = ''; AR.yaw = 0;
-  if(AR.group) AR.group.visible = false; V.sel = []; applyStyle(); arUi();
-}
-/* modelin istenen dünya konumu: T(1. nokta) · Ry(yön) · ölçek; çapa noktası (C/11 tabanı) orijinde.
-   Sabit referans: 1. noktada bir WebXR "anchor" oluşturulur. ARCore gerçek dünyadaki izleri tanıyıp
-   kaymayı düzelttikçe anchor da düzelir; model her karede anchor'a göre yeniden konumlanır. */
-function arPose(){
-  if(!AR.group || !AR.p1) return;
-  const rs = new THREE.Matrix4().compose(new THREE.Vector3(), new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0,1,0), AR.yaw), new THREE.Vector3().setScalar(0.001*AR.scale));
-  const T1 = new THREE.Matrix4().makeTranslation(AR.p1.x, AR.p1.y, AR.p1.z);
-  if(AR.anchorFirst){
-    // model = anchor(şimdi) · anchor(ilk)⁻¹ · T(1. nokta) · Ry · ölçek
-    AR.offset = new THREE.Matrix4().copy(AR.anchorFirst).invert().multiply(T1).multiply(rs);
-    AR.group.matrix.multiplyMatrices(AR.anchorPose, AR.offset);
-  } else { AR.offset = null; AR.group.matrix.multiplyMatrices(T1, rs); }
-  AR.group.matrixWorldNeedsUpdate = true;
-}
-async function arStart(){
-  if(AR.session) return;
-  AR.ui = AR.ui || arBuildUi(); AR.ui.style.display = 'flex';
-  let session;
-  try{
-    session = await navigator.xr.requestSession('immersive-ar', { requiredFeatures:['hit-test'], optionalFeatures:['dom-overlay','anchors'], domOverlay:{ root:AR.ui } });
-  }catch(err){ AR.ui.style.display = 'none'; document.getElementById('arNote').textContent = 'AR açılamadı: '+err.message; return; }
-  AR.cam = AR.cam || new THREE.PerspectiveCamera(60, 1, 0.02, 200);
-  AR.session = session; V.ar = true; AR.scale = 1; AR.lost = false; V.sel = [];
-  const r = V.r; r.xr.enabled = true; r.xr.setReferenceSpaceType('local');
-  await r.xr.setSession(session);
-  AR.ref = await session.requestReferenceSpace('local');
-  const viewer = await session.requestReferenceSpace('viewer');
-  AR.hts = await session.requestHitTestSource({ space:viewer });
-  if(!AR.group){ AR.group = new THREE.Group(); AR.group.matrixAutoUpdate = false; }
-  V.scene.remove(V.root); AR.group.add(V.root); V.scene.add(AR.group);
-  V.root.position.copy(P3(AR_ANCHOR[0], AR_ANCHOR[1], AR_ANCHOR[2])).multiplyScalar(-1);
-  if(!AR.reticle){
-    AR.reticle = new THREE.Mesh(new THREE.RingGeometry(0.09, 0.12, 32).rotateX(-Math.PI/2), new THREE.MeshBasicMaterial({ color:0xFFD43B }));
-    AR.reticle.matrixAutoUpdate = false;
-  }
-  if(!AR.mark1){
-    AR.mark1 = new THREE.Mesh(new THREE.RingGeometry(0.05, 0.12, 32).rotateX(-Math.PI/2), new THREE.MeshBasicMaterial({ color:0xE03131 }));
-  }
-  AR.reticle.visible = false; AR.mark1.visible = false; V.scene.add(AR.reticle); V.scene.add(AR.mark1);
-  session.addEventListener('select', arSelect);
-  session.addEventListener('end', arEnd);
-  arReset();
-  r.setAnimationLoop(arLoop);
-}
-function arLoop(t, frame){
-  if(!frame) return;
-  // takip durumu: konum takibi yoksa (emulatedPosition) model kullanıcıyla birlikte kayar
-  const vp = frame.getViewerPose(AR.ref), lost = !vp || !!vp.emulatedPosition;
-  if(lost !== AR.lost){ AR.lost = lost; arUi(); }
-  AR.lastHit = null;
-  if(AR.step < 2){
-    const res = frame.getHitTestResults(AR.hts);
-    if(res.length){ const pose = res[0].getPose(AR.ref); AR.reticle.visible = true; AR.reticle.matrix.fromArray(pose.transform.matrix); AR.lastHit = res[0]; }
-    else AR.reticle.visible = false;
-  } else AR.reticle.visible = false;
-  // anchor ile sabitle: ARCore düzeltmelerini modele uygula
-  if(AR.anchor && frame.trackedAnchors && frame.trackedAnchors.has(AR.anchor)){
-    const ap = frame.getPose(AR.anchor.anchorSpace, AR.ref);
-    if(ap){
-      const A = new THREE.Matrix4().fromArray(ap.transform.matrix);
-      AR.anchorPose = A;
-      if(!AR.anchorFirst){ AR.anchorFirst = A.clone(); arPose(); }
-      if(AR.offset){ AR.group.matrix.multiplyMatrices(A, AR.offset); AR.group.matrixWorldNeedsUpdate = true; }
-      if(AR.mark1.visible){ AR.mark1.position.setFromMatrixPosition(A); }
-    }
-  }
-  // isimler: gerçek boyutta okunur yükseklik (1:1'de 15 cm, 1:20'de 2 cm)
-  const hmm = AR.scale === 1 ? 150 : 400;
-  V.labels.children.forEach(o => o.scale.set(o.userData.asp*hmm, hmm, 1));
-  if((AR.frame++ % 10) === 0 && AR.step === 2){
-    const xc = V.r.xr.getCamera(AR.cam); const cam = (xc.cameras && xc.cameras[0]) || xc;
-    declutterWith(cam, window.innerWidth, window.innerHeight, hmm);
-  }
-  // XR için ayrı perspektif kamera: ortografik kameranın yakın düzlemi (1 m) masa ölçeğinde modeli keserdi
-  V.r.render(V.scene, AR.cam);
-}
-function arSelect(e){
-  if(AR.step < 2){
-    if(!AR.reticle.visible || !AR.lastHit) return;
-    const p = new THREE.Vector3().setFromMatrixPosition(AR.reticle.matrix);
-    if(AR.step === 0){
-      AR.p1 = p; AR.anchorFirst = null; AR.anchorPose = null; AR.offset = null;
-      AR.mark1.position.copy(p); AR.mark1.visible = true;
-      if(AR.lastHit.createAnchor) AR.lastHit.createAnchor().then(a => { AR.anchor = a; }).catch(() => { AR.anchor = null; });
-      if(AR.scale !== 1){ AR.step = 2; AR.group.visible = true; arPose(); AR.msg = ''; }
-      else AR.step = 1;
-      arUi(); return;
-    }
-    // 2. nokta: model yönü = 1. noktadan 2. noktaya (C/11 -> C/16) doğrultu
-    const dw = p.clone().sub(AR.p1); dw.y = 0;
-    const m1 = P3(60, -40, 0), m2 = P3(60, 3120, 0), dm = m2.clone().sub(m1);
-    AR.yaw = -(Math.atan2(dw.z, dw.x) - Math.atan2(dm.z, dm.x));
-    const meas = dw.length(), mod = dm.length()/1000;
-    AR.msg = 'Ölçülen aralık '+meas.toFixed(2).replace('.', ',')+' m (modelde '+mod.toFixed(2).replace('.', ',')+' m)'+
-      (Math.abs(meas - mod) > 0.15 ? ' — fark büyük, yeniden yerleştir.' : '.');
-    AR.step = 2; AR.group.visible = true; arPose(); arUi(); return;
-  }
-  const pose = e.frame.getPose(e.inputSource.targetRaySpace, AR.ref); if(!pose) return;
-  const m = new THREE.Matrix4().fromArray(pose.transform.matrix);
-  const o = new THREE.Vector3().setFromMatrixPosition(m), d = new THREE.Vector3(0,0,-1).transformDirection(m);
-  const rc = new THREE.Raycaster(o, d);
-  AR.group.updateMatrixWorld(true);
-  const objs = Object.values(V.meshes).filter(x => { if(!x.g.visible) return false; const vs = viewState(x.g.userData.it); return vs === 'now' || vs === 'sel' || vs === 'nb'; }).map(x => x.m);
-  const hit = rc.intersectObjects(objs, false)[0];
-  V.sel = hit ? [hit.object.userData.id] : []; AR.msg = '';
-  applyStyle(); arUi();
-}
-function arEnd(){
-  const r = V.r; r.setAnimationLoop(null); r.xr.enabled = false;
-  AR.session = null; AR.hts = null; AR.anchor = null; AR.anchorFirst = null; AR.anchorPose = null; AR.offset = null; V.ar = false;
-  V.scene.remove(AR.reticle); V.scene.remove(AR.mark1); AR.group.remove(V.root); V.scene.remove(AR.group); V.root.position.set(0,0,0); V.scene.add(V.root);
-  if(AR.ui) AR.ui.style.display = 'none';
-  V.sel = []; if(location.hash !== '#/' && location.hash) location.hash = '#/'; else { document.getElementById('info').innerHTML = ''; applyStyle(); }
-  resize(); fit();
-}
-function declutterWith(cam, Wp, Hp, hmm){
-  // AR'da yazılar üst üste binmesin: ekrandaki boyutu kameradan hesaplanır
-  const placed = [], v = new THREE.Vector3(), mw = V.root.matrixWorld, sc = AR.scale;
-  V.labels.children.slice().sort((a,b) => b.userData.prio - a.userData.prio).forEach(sp => {
-    let ok = null;
-    for(const a of (sp.userData.anchors || [sp.position.clone()])){
-      const wp = a.clone().applyMatrix4(mw); v.copy(wp).project(cam);
-      if(v.z > 1 || v.x < -1.02 || v.x > 1.02 || v.y < -1.02 || v.y > 1.02) continue;
-      const v2 = wp.clone().add(new THREE.Vector3(0, hmm*sc*0.001, 0)).project(cam);   // etiket yüksekliğinin ekrandaki karşılığı
-      const h = Math.min(80, Math.abs(v2.y - v.y)/2*Hp), w = sp.userData.asp*h;
-      const cx = (v.x+1)/2*Wp, cy = (1-v.y)/2*Hp, r = [cx-w/2-2, cy-h/2-2, cx+w/2+2, cy+h/2+2];
-      if(placed.some(q => r[0] < q[2] && r[2] > q[0] && r[1] < q[3] && r[3] > q[1])) continue;
-      ok = { a, r }; break;
-    }
-    sp.visible = !!ok; if(ok){ sp.position.copy(ok.a); placed.push(ok.r); }
-  });
-}
 let built = false;
 function page(){
   if(built) return; built = true;
@@ -444,10 +234,8 @@ function page(){
     '<div class="layers" id="layers">'+stageButtons()+'</div>'+
     '<div class="viewer big" id="viewer"><span class="vhint">Dokun: seç · boş yere dokun: seçimi kaldır · iki parmak: yakınlaş</span></div>'+
     '<div class="vbtns" id="vbtns"><button data-v="iso" aria-pressed="true">İzometrik</button><button data-v="top">Üstten (plan)</button><button data-v="front">Önden</button><button data-v="side">Yandan</button></div>'+
-    '<div class="arrow" id="arrow"></div>'+
     '<div id="info"></div>';
   init(document.getElementById('viewer'));
-  arSetup();
   document.querySelectorAll('#vbtns button').forEach(b => b.onclick = () => { V.view = b.dataset.v; document.querySelectorAll('#vbtns button').forEach(x => x.setAttribute('aria-pressed', x === b)); fit(); });
   document.querySelectorAll('#layers button').forEach(b => b.onclick = () => { setStage(+b.dataset.s); if(V.sel.length) location.hash = '#/'; else applyStyle(); });
   fit();
