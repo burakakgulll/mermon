@@ -154,7 +154,7 @@ details.drawing img{margin-top:10px}
 .arrow img{max-width:100%;height:52px;display:block}
 .arbtn{padding:12px 16px;border:0;border-radius:10px;background:#1F2D3A;color:#fff;font:700 20px var(--cond)}
 .small{font-size:14px;margin:6px 0 0}
-#arui{display:none;position:fixed;inset:0;flex-direction:column;justify-content:space-between;pointer-events:none;font-family:var(--cond)}
+#arui{display:none;position:fixed;inset:0;z-index:1000;flex-direction:column;justify-content:space-between;pointer-events:none;font-family:var(--cond)}
 #arui button{pointer-events:auto;border:0;border-radius:10px;background:rgba(31,45,58,.88);color:#fff;font:700 20px var(--cond);padding:12px 14px}
 .artop{display:flex;align-items:center;gap:8px;padding:calc(10px + env(safe-area-inset-top,0px)) 10px 0}
 .arstage{flex:1;text-align:center;background:rgba(255,255,255,.9);border-radius:10px;padding:10px;font:700 22px var(--cond);color:#1A2026}
@@ -164,3 +164,4 @@ details.drawing img{margin-top:10px}
 .arcard{margin:auto 10px 8px;background:#fff;border-left:6px solid #E03131;border-radius:10px;padding:10px 12px;font:600 20px var(--cond);color:#1A2026}
 .arbot{display:flex;gap:6px;flex-wrap:wrap;padding:0 10px calc(12px + env(safe-area-inset-bottom,0px))}
 .arbot button{flex:1 1 auto}
+#arui .arskip{align-self:center;margin-top:8px;background:#E8590C}
