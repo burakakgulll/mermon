@@ -161,6 +161,7 @@ function applyStyle(){
   render();
 }
 function render(){
+  if(V.ar) return;                      // AR açıkken çizimi XR döngüsü yapar
   if(!(V.r && V.el && V.el.isConnected)) return;
   const c = V.cam, ws = (c.top - c.bottom)/c.zoom;
   V.labels.children.forEach(o => o.scale.set(o.userData.asp*o.userData.h*ws, o.userData.h*ws, 1));
@@ -225,7 +226,163 @@ function infoCard(ids){
     (it.kg ? '<div><div class="k">Ağırlık'+(n > 1 ? ' (her biri)' : '')+'</div><div class="v">'+String(it.kg).replace('.', ',')+' kg</div></div>' : '')+'</div></div>';
 }
 function stageButtons(){ return STAGES.map((k,i) => '<button data-s="'+i+'" aria-pressed="'+(i === stage)+'"><i style="background:'+GRP[k].css+'"></i>'+(i+1)+'. '+GRP[k].n+'</button>').join(''); }
-function setStage(k){ stage = k; document.querySelectorAll('#layers button').forEach(b => b.setAttribute('aria-pressed', +b.dataset.s === k)); }
+function setStage(k){ stage = k; document.querySelectorAll('#layers button').forEach(b => b.setAttribute('aria-pressed', +b.dataset.s === k)); arStageChanged(); }
+
+/* ================= AR (kamera açık) =================
+   Android (Chrome, ARCore): WebXR "immersive-ar". Sadece https'ten (GitHub Pages) açılınca çalışır.
+   iPhone (Safari): AR Quick Look ile her aşama için hazır .usdz dosyası (ar/asamaN.usdz).
+   Yerleştirme noktası: C/11 kolonunun (aks 1/A) taban plakası ortası. */
+const AR_ANCHOR = [60, -40, 0];          // mm, IFC koordinatı
+const AR = { session:null, ref:null, hts:null, group:null, reticle:null, placed:false, scale:1, yaw:0, ui:null, frame:0 };
+function arSupportedIOS(){ const a = document.createElement('a'); return !!(a.relList && a.relList.supports && a.relList.supports('ar')); }
+function arButtonImg(text){
+  const c = document.createElement('canvas'), ctx = c.getContext('2d'), fs = 34;
+  ctx.font = '700 '+fs+'px "Barlow Condensed","Arial Narrow",Arial,sans-serif';
+  c.width = Math.ceil(ctx.measureText(text).width) + 40; c.height = fs + 30;
+  ctx.fillStyle = '#1F2D3A'; ctx.beginPath(); if(ctx.roundRect) ctx.roundRect(0,0,c.width,c.height,10); else ctx.rect(0,0,c.width,c.height); ctx.fill();
+  ctx.font = '700 '+fs+'px "Barlow Condensed","Arial Narrow",Arial,sans-serif'; ctx.fillStyle = '#fff'; ctx.textBaseline = 'middle'; ctx.fillText(text, 20, c.height/2+2);
+  return c.toDataURL('image/png');
+}
+function arSetup(){
+  const row = document.getElementById('arrow'); if(!row) return;
+  const ios = arSupportedIOS(), single = !!window.SAHA_SINGLE;
+  let html = '<h3>Kamerada gör (AR)</h3>';
+  if(ios && !single) html += '<a rel="ar" id="arIos" href="ar/asama'+(stage+1)+'.usdz"><img id="arIosImg" alt="AR"></a>'+
+    '<p class="muted small">iPhone: model yere oturur; parmakla kaydır, iki parmakla döndür. Seçme ve isimler bu görüntüleyicide yok.</p>';
+  html += '<button id="arBtn" class="arbtn" hidden>Kamerada gör (Android)</button><p id="arNote" class="muted small"></p>';
+  row.innerHTML = html;
+  arStageChanged();
+  const note = document.getElementById('arNote');
+  if(single){ note.textContent = 'AR, tek dosya sürümünde çalışmaz. Siteyi GitHub adresinden aç; iPhone için ar klasöründeki .usdz dosyaları Dosyalar uygulamasından da açılır.'; return; }
+  if(navigator.xr && navigator.xr.isSessionSupported){
+    navigator.xr.isSessionSupported('immersive-ar').then(ok => {
+      if(ok){ const b = document.getElementById('arBtn'); b.hidden = false; b.onclick = arStart; note.textContent = 'Telefonu yere doğrult, halka çıkınca dokun: C/11 kolonunun (aks 1/A) tabanı oraya gelir.'; }
+      else if(!ios) note.textContent = 'Bu telefonda/tarayıcıda AR yok. Android’de Chrome ve “Google Play Hizmetleri (AR)” gerekir.';
+    }).catch(() => {});
+  } else if(!ios) note.textContent = 'Bu tarayıcıda AR yok. Android’de Chrome, iPhone’da Safari kullan.';
+}
+function arStageChanged(){
+  const a = document.getElementById('arIos'), im = document.getElementById('arIosImg');
+  if(a){ a.href = 'ar/asama'+(stage+1)+'.usdz'; im.src = arButtonImg('Kamerada gör (iPhone) · '+(stage+1)+'. '+GRP[STAGES[stage]].n); }
+  if(AR.ui) arUi();
+}
+function arUi(){
+  const u = AR.ui, it = V.sel.length ? BY[V.sel[0]] : null;
+  u.querySelector('.arstage').textContent = (stage+1)+'. '+GRP[STAGES[stage]].n;
+  u.querySelector('.arscale').textContent = AR.scale === 1 ? 'Ölçek 1:1' : 'Ölçek 1:20';
+  u.querySelector('.arhint').textContent = !AR.placed ? 'Telefonu yere doğrult. Halka çıkınca ekrana dokun: C/11 (aks 1/A) tabanı oraya gelir.'
+    : (it ? '' : 'Elemana dokun: seç. Boş yere dokun: seçimi kaldır.');
+  u.querySelector('.arcard').innerHTML = it ? '<b>'+esc(it.mark)+'</b> · Cıvata: yok (kaynaklı) · '+String(it.kg).replace('.', ',')+' kg' : '';
+  u.querySelector('.arcard').hidden = !it;
+}
+function arBuildUi(){
+  const u = document.createElement('div'); u.id = 'arui';
+  u.innerHTML = '<div class="artop"><button data-a="prev">‹</button><span class="arstage"></span><button data-a="next">›</button><button data-a="exit" class="arexit">Çık</button></div>'+
+    '<div class="arhint"></div><div class="arcard" hidden></div>'+
+    '<div class="arbot"><button data-a="rl">⟲ 15°</button><button data-a="rr">⟳ 15°</button><button data-a="scale" class="arscale"></button><button data-a="re">Yeniden yerleştir</button></div>';
+  // butonlara dokunmak sahnede "seç" sayılmasın
+  u.addEventListener('beforexrselect', e => { if(e.target.closest('button')) e.preventDefault(); });
+  u.addEventListener('click', e => {
+    const b = e.target.closest('button'); if(!b) return;
+    const a = b.dataset.a;
+    if(a === 'exit') AR.session && AR.session.end();
+    else if(a === 'prev' || a === 'next'){ setStage(Math.max(0, Math.min(STAGES.length-1, stage + (a === 'next' ? 1 : -1)))); V.sel = []; applyStyle(); arUi(); }
+    else if(a === 'rl' || a === 'rr'){ AR.yaw += (a === 'rl' ? 1 : -1) * Math.PI/12; arPose(); }
+    else if(a === 'scale'){ AR.scale = AR.scale === 1 ? 1/20 : 1; arPose(); arUi(); }
+    else if(a === 're'){ AR.placed = false; AR.group.visible = false; V.sel = []; applyStyle(); arUi(); }
+  });
+  document.body.appendChild(u); return u;
+}
+function arPose(){
+  const g = AR.group; if(!g || !AR.at) return;
+  g.position.copy(AR.at); g.rotation.set(0, AR.yaw, 0); g.scale.setScalar(0.001 * AR.scale); g.updateMatrixWorld(true);
+}
+async function arStart(){
+  if(AR.session) return;
+  AR.ui = AR.ui || arBuildUi(); AR.ui.style.display = 'flex';
+  let session;
+  try{
+    session = await navigator.xr.requestSession('immersive-ar', { requiredFeatures:['hit-test'], optionalFeatures:['dom-overlay'], domOverlay:{ root:AR.ui } });
+  }catch(err){ AR.ui.style.display = 'none'; document.getElementById('arNote').textContent = 'AR açılamadı: '+err.message; return; }
+  AR.cam = AR.cam || new THREE.PerspectiveCamera(60, 1, 0.02, 200);
+  AR.session = session; V.ar = true; AR.placed = false; AR.yaw = 0; AR.scale = 1; V.sel = [];
+  const r = V.r; r.xr.enabled = true; r.xr.setReferenceSpaceType('local');
+  await r.xr.setSession(session);
+  AR.ref = await session.requestReferenceSpace('local');
+  const viewer = await session.requestReferenceSpace('viewer');
+  AR.hts = await session.requestHitTestSource({ space:viewer });
+  // model: V.root sahneden alınıp AR grubuna takılır (mm; çapa noktası orijine)
+  if(!AR.group){ AR.group = new THREE.Group(); }
+  V.scene.remove(V.root); AR.group.add(V.root); V.scene.add(AR.group);
+  V.root.position.copy(P3(AR_ANCHOR[0], AR_ANCHOR[1], AR_ANCHOR[2])).multiplyScalar(-1);
+  AR.group.visible = false;
+  if(!AR.reticle){
+    AR.reticle = new THREE.Mesh(new THREE.RingGeometry(0.09, 0.12, 32).rotateX(-Math.PI/2), new THREE.MeshBasicMaterial({ color:0xFFD43B }));
+    AR.reticle.matrixAutoUpdate = false;
+  }
+  AR.reticle.visible = false; V.scene.add(AR.reticle);
+  session.addEventListener('select', arSelect);
+  session.addEventListener('end', arEnd);
+  applyStyle(); arUi();
+  r.setAnimationLoop(arLoop);
+}
+function arLoop(t, frame){
+  if(!frame) return;
+  if(!AR.placed){
+    const res = frame.getHitTestResults(AR.hts);
+    if(res.length){ const pose = res[0].getPose(AR.ref); AR.reticle.visible = true; AR.reticle.matrix.fromArray(pose.transform.matrix); }
+    else AR.reticle.visible = false;
+  }
+  // isimler: gerçek boyutta okunur yükseklik (1:1'de 15 cm, 1:20'de 2 cm)
+  const hmm = AR.scale === 1 ? 150 : 400;
+  V.labels.children.forEach(o => o.scale.set(o.userData.asp*hmm, hmm, 1));
+  if((AR.frame++ % 10) === 0 && AR.placed){
+    const xc = V.r.xr.getCamera(AR.cam); const cam = (xc.cameras && xc.cameras[0]) || xc;
+    declutterWith(cam, window.innerWidth, window.innerHeight, hmm);
+  }
+  // XR için ayrı perspektif kamera: ortografik kameranın yakın düzlemi (1 m) masa ölçeğinde modeli keserdi
+  V.r.render(V.scene, AR.cam);
+}
+function arSelect(e){
+  if(!AR.placed){
+    if(!AR.reticle.visible) return;
+    AR.at = new THREE.Vector3().setFromMatrixPosition(AR.reticle.matrix);
+    AR.placed = true; AR.reticle.visible = false; AR.group.visible = true; arPose(); arUi(); return;
+  }
+  const pose = e.frame.getPose(e.inputSource.targetRaySpace, AR.ref); if(!pose) return;
+  const m = new THREE.Matrix4().fromArray(pose.transform.matrix);
+  const o = new THREE.Vector3().setFromMatrixPosition(m), d = new THREE.Vector3(0,0,-1).transformDirection(m);
+  const rc = new THREE.Raycaster(o, d);
+  const objs = Object.values(V.meshes).filter(x => { if(!x.g.visible) return false; const vs = viewState(x.g.userData.it); return vs === 'now' || vs === 'sel' || vs === 'nb'; }).map(x => x.m);
+  const hit = rc.intersectObjects(objs, false)[0];
+  V.sel = hit ? [hit.object.userData.id] : [];
+  applyStyle(); arUi();
+}
+function arEnd(){
+  const r = V.r; r.setAnimationLoop(null); r.xr.enabled = false;
+  AR.session = null; AR.hts = null; V.ar = false;
+  V.scene.remove(AR.reticle); AR.group.remove(V.root); V.scene.remove(AR.group); V.root.position.set(0,0,0); V.scene.add(V.root);
+  if(AR.ui) AR.ui.style.display = 'none';
+  V.sel = []; if(location.hash !== '#/' && location.hash) location.hash = '#/'; else { document.getElementById('info').innerHTML = ''; applyStyle(); }
+  resize(); fit();
+}
+function declutterWith(cam, Wp, Hp, hmm){
+  // AR'da yazılar üst üste binmesin: ekrandaki boyutu kameradan hesaplanır
+  const placed = [], v = new THREE.Vector3(), mw = V.root.matrixWorld, sc = AR.scale;
+  V.labels.children.slice().sort((a,b) => b.userData.prio - a.userData.prio).forEach(sp => {
+    let ok = null;
+    for(const a of (sp.userData.anchors || [sp.position.clone()])){
+      const wp = a.clone().applyMatrix4(mw); v.copy(wp).project(cam);
+      if(v.z > 1 || v.x < -1.02 || v.x > 1.02 || v.y < -1.02 || v.y > 1.02) continue;
+      const v2 = wp.clone().add(new THREE.Vector3(0, hmm*sc*0.001, 0)).project(cam);   // etiket yüksekliğinin ekrandaki karşılığı
+      const h = Math.min(80, Math.abs(v2.y - v.y)/2*Hp), w = sp.userData.asp*h;
+      const cx = (v.x+1)/2*Wp, cy = (1-v.y)/2*Hp, r = [cx-w/2-2, cy-h/2-2, cx+w/2+2, cy+h/2+2];
+      if(placed.some(q => r[0] < q[2] && r[2] > q[0] && r[1] < q[3] && r[3] > q[1])) continue;
+      ok = { a, r }; break;
+    }
+    sp.visible = !!ok; if(ok){ sp.position.copy(ok.a); placed.push(ok.r); }
+  });
+}
 let built = false;
 function page(){
   if(built) return; built = true;
@@ -233,8 +390,10 @@ function page(){
     '<div class="layers" id="layers">'+stageButtons()+'</div>'+
     '<div class="viewer big" id="viewer"><span class="vhint">Dokun: seç · boş yere dokun: seçimi kaldır · iki parmak: yakınlaş</span></div>'+
     '<div class="vbtns" id="vbtns"><button data-v="iso" aria-pressed="true">İzometrik</button><button data-v="top">Üstten (plan)</button><button data-v="front">Önden</button><button data-v="side">Yandan</button></div>'+
+    '<div class="arrow" id="arrow"></div>'+
     '<div id="info"></div>';
   init(document.getElementById('viewer'));
+  arSetup();
   document.querySelectorAll('#vbtns button').forEach(b => b.onclick = () => { V.view = b.dataset.v; document.querySelectorAll('#vbtns button').forEach(x => x.setAttribute('aria-pressed', x === b)); fit(); });
   document.querySelectorAll('#layers button').forEach(b => b.onclick = () => { setStage(+b.dataset.s); if(V.sel.length) location.hash = '#/'; else applyStyle(); });
   fit();
